@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Radar ADS-B 1.09 GHz</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: monospace; user-select: none; }
+    body { background: #040806; color: #dcfce7; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 12px; }
+    .app { background: #091510; border: 2px solid #10b981; border-radius: 16px; padding: 15px; width: 100%; max-width: 410px; }
+    .top { display: flex; justify-content: space-between; font-size: 11px; color: #34d399; font-weight: bold; margin-bottom: 10px; }
+    .radar-box { position: relative; width: 230px; height: 230px; margin: 0 auto 10px; border-radius: 50%; border: 2px solid #059669; background: radial-gradient(circle, #06281e 10%, #020c08 90%); overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; }
+    .freq-tag { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); font-size: 10px; background: rgba(2,12,8,0.85); color: #6ee7b7; padding: 2px 8px; border-radius: 10px; border: 1px solid #059669; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; text-align: center; }
+    .box { background: #062016; padding: 7px 4px; border-radius: 8px; border: 1px solid #064e3b; font-size: 10px; }
+    .box b { font-size: 12px; color: #fff; display: block; margin-top: 2px; }
+    button { width: 100%; padding: 10px; border-radius: 8px; border: none; font-weight: bold; font-size: 11px; margin-bottom: 8px; color: #fff; cursor: pointer; }
+    .b-live { background: #059669; } .b-sim { background: #0284c7; } .b-sav { background: #d97706; }
+    .lista { background: #020c08; border: 1px dashed #065f46; padding: 8px; border-radius: 8px; max-height: 95px; overflow-y: auto; font-size: 10px; color: #a7f3d0; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="top"><span>✈️ RADAR ADS-B 1090 MHz</span><span id="gpsAdsb">PUYO / PASTAZA</span></div>
+    <div class="radar-box">
+      <canvas id="cvRadar"></canvas>
+      <div class="freq-tag">RX: 1.09 GHz | ANTENA: 6.8 cm</div>
+    </div>
+    <div class="grid">
+      <div class="box">VUELOS EN RANGO<b id="vCont">0</b></div>
+      <div class="box">MÁS CERCANO<b id="vCerca">-- km</b></div>
+      <div class="box">MODO RECEPCIÓN<b id="vModo">EN VIVO</b></div>
+    </div>
+    <button class="b-live" onclick="buscarVuelosReales()">📡 ESCANEAR ESPACIO AÉREO REAL (150 KM)</button>
+    <button class="b-sim" onclick="generarTraficoLocal()">🛩️ SIMULAR TRÁFICO AÉREO AMAZONÍA</button>
+    <button class="b-sav" onclick="guardarVuelos()">💾 GUARDAR REGISTRO DE TRÁFICO</button>
+    <div class="lista" id="listaVuelos"></div>
+  </div>
+  <script>
+    const KEY_ADSB = 'radar_adsb_1090_v1';
+    let lat = -1.4837, lon = -78.0026; // Puyo por defecto
+    let aviones = [], anguloBarrido = 0, ctxA = null;
+    let historial = JSON.parse(localStorage.getItem(KEY_ADSB)) || [];
+
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(p => {
+        lat = p.coords.latitude; lon = p.coords.longitude;
+        document.getElementById('gpsAdsb').innerText = `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
+        buscarVuelosReales();
+      }, () => buscarVuelosReales());
+    } else { buscarVuelosReales(); }
+
+    function pingRadar() {
+      if (!ctxA) ctxA = new (window.AudioContext || window.webkitAudioContext)();
+      if (ctxA.state === 'suspended') ctxA.resume();
+      const o = ctxA.createOscillator(), g = ctxA.createGain();
+      o.frequency.value = 1600; g.gain.value = 0.04;
+      o.connect(g); g.connect(ctxA.destination);
+      o.start(); o.stop(ctxA.currentTime + 0.04);
+    }
+    async function buscarVuelosReales() {
+      document.getElementById('vModo').innerText = 'BUSCANDO...';
+      try {
+        const d = 1.6;
+        const url = `https://opensky-network.org{lat-d}&lomin=${lon-d}&lamax=${lat+d}&lomax=${lon+d}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.states && data.states.length > 0) {
+          aviones = data.states.map(s => {
+            const callsign = (s[1] || 'VUELO-ICAO').trim();
+            const aLon = s[5], aLat = s[6], alt = Math.round((s[7] || 3000) * 3.28);
+            const dx = (aLon - lon) * 111 * Math.cos(lat * Math.PI / 180);
+            const dy = (aLat - lat) * 111;
+            const dist = Math.round(Math.sqrt(dx*dx + dy*dy));
+            return { id: callsign, dx, dy, dist, alt };
+          }).filter(a => a.dist <= 180).sort((a, b) => a.dist - b.dist);
+          document.getElementById('vModo').innerText = 'ADS-B VIVO';
+          pingRadar();
+        } else { document.getElementById('vModo').innerText = 'CIELO DESPEJADO'; aviones = []; }
+      } catch (e) { generarTraficoLocal(); document.getElementById('vModo').innerText = 'MODO LOCAL'; }
+      actualizarLista();
+    }
+    function generarTraficoLocal() {
+      aviones = [
+        { id: 'HC-CGT (AVIONETA)', dx: 18, dy: 24, dist: 30, alt: 8500 },
+        { id: 'LPE2415 (AIRBUS)', dx: -45, dy: 60, dist: 75, alt: 34000 },
+        { id: 'FAE-452 (MILITAR)', dx: 12, dy: -15, dist: 19, alt: 6200 },
+        { id: 'AVN812 (CARGA)', dx: -80, dy: -55, dist: 97, alt: 36000 }
+      ];
+      document.getElementById('vModo').innerText = 'SIMULACIÓN';
+      pingRadar(); actualizarLista();
+    }
+    function actualizarLista() {
+      document.getElementById('vCont').innerText = aviones.length;
+      document.getElementById('vCerca').innerText = aviones.length ? aviones[0].dist + ' km' : '-- km';
+      const htmlActual = aviones.map(a => `<div>✈️ <b>${a.id}</b> | Dist: ${a.dist} km | Alt: ${a.alt} ft</div>`).join('');
+      const htmlHist = historial.map(h => `<div style="color:#64748b;">💾 ${h}</div>`).join('');
+      document.getElementById('listaVuelos').innerHTML = (htmlActual || '<div>Sin aeronaves en este momento...</div>') + htmlHist;
+    }
+    function guardarVuelos() {
+      if (!aviones.length) return;
+      const top = aviones[0];
+      historial.unshift(`${new Date().toLocaleTimeString()} | ${top.id} (${top.dist}km - ${top.alt}ft)`);
+      localStorage.setItem(KEY_ADSB, JSON.stringify(historial));
+      actualizarLista();
+    }
+    const cv = document.getElementById('cvRadar'), c = cv.getContext('2d');
+    function animarRadar() {
+      cv.width = cv.offsetWidth; cv.height = cv.offsetHeight;
+      const cx = cv.width / 2, cy = cv.height / 2, r = cx - 6;
+      c.clearRect(0, 0, cv.width, cv.height);
+      c.strokeStyle = 'rgba(16, 185, 129, 0.25)'; c.lineWidth = 1;
+      [0.33, 0.66, 1].forEach(f => { c.beginPath(); c.arc(cx, cy, r * f, 0, Math.PI * 2); c.stroke(); });
+      c.save(); c.translate(cx, cy); c.rotate(anguloBarrido);
+      c.strokeStyle = '#34d399'; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(0, 0); c.lineTo(r, 0); c.stroke();
+      c.restore();
+      aviones.forEach(a => {
+        const px = cx + (a.dx / 160) * r, py = cy - (a.dy / 160) * r;
+        c.fillStyle = '#fbbf24'; c.beginPath(); c.arc(px, py, 4, 0, Math.PI * 2); c.fill();
+        c.fillStyle = '#a7f3d0'; c.font = '9px monospace';
+        c.fillText(a.id.split(' ')[0], px + 6, py + 3);
+      });
+      anguloBarrido += 0.03;
+      requestAnimationFrame(animarRadar);
+    }
+    animarRadar();
+  </script>
+</body>
+</html>
